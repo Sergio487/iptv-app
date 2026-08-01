@@ -31,4 +31,254 @@
 
   #loadbar{display:flex; gap:8px; padding:10px 12px; background:var(--panel); border-bottom:1px solid var(--border);}
   #m3u-input{flex:1; min-width:0; background:var(--panel-2); border:1px solid var(--border); color:var(--text);
-    border-radius:8px; padding:9
+    border-radius:8px; padding:9px 10px; font-size:13px;}
+  #m3u-input::placeholder{color:var(--text-dim);}
+  #load-btn{background:var(--accent); color:#04150e; border:none; border-radius:8px; padding:0 16px;
+    font-weight:600; font-size:13px;}
+
+  #tabs{display:flex; background:var(--panel); border-bottom:1px solid var(--border); flex-shrink:0;}
+  .tab{flex:1; text-align:center; padding:11px 4px; font-size:13px; color:var(--text-dim);
+    border-bottom:2px solid transparent; font-weight:600; letter-spacing:.2px;}
+  .tab.active{color:var(--accent); border-color:var(--accent);}
+
+  #categories{display:flex; gap:8px; padding:10px 12px; overflow-x:auto; background:var(--bg); flex-shrink:0;}
+  #categories::-webkit-scrollbar{display:none;}
+  .chip{flex-shrink:0; padding:6px 14px; border-radius:20px; background:var(--panel-2); color:var(--text-dim);
+    font-size:12px; border:1px solid var(--border); white-space:nowrap;}
+  .chip.active{background:var(--accent); color:#04150e; border-color:var(--accent);}
+
+  #list{flex:1; overflow-y:auto; padding:4px 0 24px;}
+  .row{display:flex; align-items:center; gap:12px; padding:11px 14px; border-bottom:1px solid var(--border);}
+  .row:active{background:var(--panel-2);}
+  .logo{width:38px; height:38px; border-radius:8px; background:var(--panel-2); flex-shrink:0;
+    display:flex; align-items:center; justify-content:center; font-size:12px; color:var(--text-dim); overflow:hidden;}
+  .logo img{width:100%; height:100%; object-fit:contain;}
+  .meta{flex:1; min-width:0;}
+  .name{font-size:14px; font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+  .group{font-size:11px; color:var(--text-dim); margin-top:2px;}
+  .fav-btn{background:none; border:none; color:var(--text-dim); font-size:18px; padding:6px;}
+  .fav-btn.active{color:var(--accent-2);}
+  #empty-state{padding:40px 20px; text-align:center; color:var(--text-dim); font-size:13px; line-height:1.6;}
+</style>
+</head>
+<body>
+<div id="app">
+
+  <div id="player-wrap">
+    <video id="player" controls playsinline></video>
+    <div id="player-empty">
+      <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 5h16v12H4z"/><path d="M9 21h6M12 17v4"/></svg>
+      <span>Kein Sender ausgewählt</span>
+    </div>
+    <div id="now-playing" style="display:none"></div>
+  </div>
+
+  <div id="loadbar">
+    <input id="m3u-input" placeholder="M3U-Playlist-URL einfügen …">
+    <button id="load-btn">Laden</button>
+  </div>
+
+  <div id="tabs">
+    <div class="tab active" data-tab="live">Live TV</div>
+    <div class="tab" data-tab="favorites">Favoriten</div>
+  </div>
+
+  <div id="categories"></div>
+
+  <div id="list">
+    <div id="empty-state">Noch keine Playlist geladen.<br>Füg oben deinen M3U-Link ein und tippe auf „Laden".</div>
+  </div>
+
+</div>
+
+<script>
+(function(){
+  var video = document.getElementById('player');
+  var playerEmpty = document.getElementById('player-empty');
+  var nowPlaying = document.getElementById('now-playing');
+  var hls = null;
+
+  var channels = [];
+  var favorites = JSON.parse(localStorage.getItem('iptv_favorites') || '[]');
+  var currentTab = 'live';
+  var currentCategory = 'Alle';
+
+  var input = document.getElementById('m3u-input');
+  var loadBtn = document.getElementById('load-btn');
+  var listEl = document.getElementById('list');
+  var catsEl = document.getElementById('categories');
+  var tabs = document.querySelectorAll('.tab');
+
+  var savedUrl = localStorage.getItem('iptv_last_url');
+  if (savedUrl) input.value = savedUrl;
+
+  loadBtn.addEventListener('click', function(){
+    var url = input.value.trim();
+    if (!url) return;
+    localStorage.setItem('iptv_last_url', url);
+    loadPlaylist(url);
+  });
+
+  tabs.forEach(function(t){
+    t.addEventListener('click', function(){
+      tabs.forEach(function(x){ x.classList.remove('active'); });
+      t.classList.add('active');
+      currentTab = t.dataset.tab;
+      render();
+    });
+  });
+
+  function loadPlaylist(url){
+    listEl.innerHTML = '<div id="empty-state">Lade Playlist …</div>';
+    fetch(url)
+      .then(function(r){ if(!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
+      .then(function(text){
+        channels = parseM3U(text);
+        if (channels.length === 0){
+          listEl.innerHTML = '<div id="empty-state">Playlist geladen, aber keine Sender gefunden.</div>';
+          return;
+        }
+        buildCategories();
+        render();
+      })
+      .catch(function(err){
+        listEl.innerHTML = '<div id="empty-state">Playlist konnte nicht geladen werden.<br>' + err.message + '</div>';
+      });
+  }
+
+  function parseM3U(text){
+    var lines = text.split(/\r?\n/);
+    var result = [];
+    var cur = null;
+    for (var i = 0; i < lines.length; i++){
+      var line = lines[i].trim();
+      if (line.startsWith('#EXTINF')){
+        var nameMatch = line.match(/,(.*)$/);
+        var logoMatch = line.match(/tvg-logo="([^"]*)"/);
+        var groupMatch = line.match(/group-title="([^"]*)"/);
+        cur = {
+          name: nameMatch ? nameMatch[1].trim() : 'Unbekannt',
+          logo: logoMatch ? logoMatch[1] : '',
+          group: groupMatch ? groupMatch[1] : 'Ohne Kategorie'
+        };
+      } else if (line && !line.startsWith('#') && cur){
+        cur.url = line;
+        cur.id = cur.name + '|' + cur.url;
+        result.push(cur);
+        cur = null;
+      }
+    }
+    return result;
+  }
+
+  function buildCategories(){
+    var groups = ['Alle'];
+    channels.forEach(function(c){
+      if (groups.indexOf(c.group) === -1) groups.push(c.group);
+    });
+    catsEl.innerHTML = '';
+    groups.forEach(function(g){
+      var chip = document.createElement('div');
+      chip.className = 'chip' + (g === currentCategory ? ' active' : '');
+      chip.textContent = g;
+      chip.addEventListener('click', function(){
+        currentCategory = g;
+        buildCategories();
+        render();
+      });
+      catsEl.appendChild(chip);
+    });
+  }
+
+  function render(){
+    var source = currentTab === 'favorites'
+      ? channels.filter(function(c){ return favorites.indexOf(c.id) !== -1; })
+      : channels;
+
+    if (currentTab === 'live' && currentCategory !== 'Alle'){
+      source = source.filter(function(c){ return c.group === currentCategory; });
+    }
+
+    catsEl.style.display = currentTab === 'live' ? 'flex' : 'none';
+
+    if (source.length === 0){
+      listEl.innerHTML = '<div id="empty-state">' +
+        (currentTab === 'favorites' ? 'Noch keine Favoriten markiert.' : 'Keine Sender in dieser Kategorie.') +
+        '</div>';
+      return;
+    }
+
+    listEl.innerHTML = '';
+    source.forEach(function(c){
+      var row = document.createElement('div');
+      row.className = 'row';
+
+      var logo = document.createElement('div');
+      logo.className = 'logo';
+      if (c.logo){
+        var img = document.createElement('img');
+        img.src = c.logo;
+        img.onerror = function(){ logo.textContent = 'TV'; };
+        logo.appendChild(img);
+      } else {
+        logo.textContent = 'TV';
+      }
+
+      var meta = document.createElement('div');
+      meta.className = 'meta';
+      meta.innerHTML = '<div class="name"></div><div class="group"></div>';
+      meta.querySelector('.name').textContent = c.name;
+      meta.querySelector('.group').textContent = c.group;
+
+      var favBtn = document.createElement('button');
+      favBtn.className = 'fav-btn' + (favorites.indexOf(c.id) !== -1 ? ' active' : '');
+      favBtn.textContent = favorites.indexOf(c.id) !== -1 ? '★' : '☆';
+      favBtn.addEventListener('click', function(e){
+        e.stopPropagation();
+        toggleFavorite(c.id);
+        favBtn.classList.toggle('active');
+        favBtn.textContent = favBtn.classList.contains('active') ? '★' : '☆';
+        if (currentTab === 'favorites') render();
+      });
+
+      row.appendChild(logo);
+      row.appendChild(meta);
+      row.appendChild(favBtn);
+      row.addEventListener('click', function(){ playChannel(c); });
+
+      listEl.appendChild(row);
+    });
+  }
+
+  function toggleFavorite(id){
+    var idx = favorites.indexOf(id);
+    if (idx === -1) favorites.push(id); else favorites.splice(idx, 1);
+    localStorage.setItem('iptv_favorites', JSON.stringify(favorites));
+  }
+
+  function playChannel(c){
+    playerEmpty.style.display = 'none';
+    nowPlaying.style.display = 'block';
+    nowPlaying.textContent = c.name;
+
+    if (hls){ hls.destroy(); hls = null; }
+
+    if (video.canPlayType('application/vnd.apple.mpegurl')){
+      video.src = c.url;
+      video.play();
+    } else if (Hls.isSupported()){
+      hls = new Hls();
+      hls.loadSource(c.url);
+      hls.attachMedia(video);
+      hls.on(Hls.Events.MANIFEST_PARSED, function(){ video.play(); });
+    } else {
+      video.src = c.url;
+      video.play();
+    }
+  }
+
+  if (savedUrl) loadPlaylist(savedUrl);
+})();
+</script>
+</body>
+</html>
